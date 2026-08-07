@@ -1,0 +1,12 @@
+# Prevent committing sensitive credentials
+secrets.yaml
+
+# ESPHome local build files and binaries
+.esphome/
+*.bin
+*.elf
+
+# OS & Editor cache files
+.DS_Store
+.vscode/
+.idea/
