@@ -1,0 +1,200 @@
+# Board: Seeed XIAO ESP32C3 (or generic ESP32)
+esphome:
+  name: holman-garden-controller
+  friendly_name: Holman Garden Controller
+
+esp32:
+  variant: esp32c3
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+
+# MQTT Client setup
+mqtt:
+  broker: !secret mqtt_broker
+  port: 1883
+  username: !secret mqtt_user
+  password: !secret mqtt_password
+  id: mqtt_client
+  discovery: false  # Uses custom JSON topic payload for Home Assistant discovery
+
+  on_connect:
+    - logger.log: "Connected to MQTT Broker! Publishing Home Assistant discovery profile..."
+    - script.execute: publish_discovery
+
+  on_message:
+    - topic: homeassistant/light/garden_lights/set
+      then:
+        - lambda: |-
+            // Parse incoming HA JSON: {"state": "ON", "brightness": 75} or {"state": "OFF"}
+            std::string payload = x;
+            int level = 0;
+
+            bool is_off = (payload.find("\"OFF\"") != std::string::npos || payload.find("\"state\":\"OFF\"") != std::string::npos || payload.find("\"state\": \"OFF\"") != std::string::npos);
+            bool is_on = (payload.find("\"ON\"") != std::string::npos || payload.find("\"state\":\"ON\"") != std::string::npos || payload.find("\"state\": \"ON\"") != std::string::npos);
+
+            if (is_off) {
+              level = 0;
+            } else if (is_on) {
+              size_t pos = payload.find("\"brightness\"");
+              if (pos != std::string::npos) {
+                size_t colon = payload.find(':', pos);
+                if (colon != std::string::npos) {
+                  level = std::atoi(payload.substr(colon + 1).c_str());
+                }
+              }
+              if (level <= 0) {
+                level = id(last_known_brightness);
+              }
+            }
+
+            // Set debouncer target and wake the worker loop
+            id(target_level) = level;
+            id(run_ble_worker).execute();
+
+    - topic: homeassistant/status
+      then:
+        - lambda: |-
+            if (x == "online") {
+              ESP_LOGI("mqtt", "Home Assistant announced ONLINE. Re-syncing discovery payload...");
+              id(publish_discovery).execute();
+            }
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+captive_portal:
+
+# Runtime state variables
+globals:
+  - id: target_level
+    type: int
+    initial_value: '-1'
+  - id: job_level
+    type: int
+    initial_value: '0'
+  - id: last_known_brightness
+    type: int
+    initial_value: '100'
+  - id: ble_attempt
+    type: int
+    initial_value: '1'
+  - id: ble_success
+    type: bool
+    initial_value: 'false'
+
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 110ms
+    window: 100ms
+    active: true
+
+ble_client:
+  - mac_address: !secret holman_ble_mac
+    id: holman_ble
+    auto_connect: false
+
+script:
+  # Publishes the Home Assistant Auto-Discovery configuration packet
+  - id: publish_discovery
+    then:
+      - mqtt.publish:
+          topic: "homeassistant/light/garden_lights/config"
+          payload: '{"name":"Garden Lights","unique_id":"holman_vibrance_ww_controller","schema":"json","command_topic":"homeassistant/light/garden_lights/set","state_topic":"homeassistant/light/garden_lights/state","brightness":true,"brightness_scale":100,"device":{"identifiers":["holman_garden_controller"],"name":"Holman Garden Lights","model":"Vibrance WW Controller","manufacturer":"Holman"}}'
+          retain: true
+
+  # Debounced Worker Loop (Executes BLE commands and drops stale intermediate targets)
+  - id: run_ble_worker
+    mode: single  # Prevents overlapping execution loops while allowing target_level to update
+    then:
+      - while:
+          condition:
+            lambda: 'return id(target_level) >= 0;'
+          then:
+            # Consume target level atomically
+            - lambda: |-
+                id(job_level) = id(target_level);
+                id(target_level) = -1;
+                ESP_LOGI("worker", "Deploying state update request: %d%%", id(job_level));
+
+            - lambda: |-
+                id(ble_attempt) = 1;
+                id(ble_success) = false;
+
+            # Retry loop (up to 3 attempts)
+            - while:
+                condition:
+                  lambda: 'return id(ble_attempt) <= 3 && !id(ble_success);'
+                then:
+                  - logger.log: "Scanning/Connecting to Holman peripheral..."
+                  - lambda: |-
+                      id(holman_ble).set_remote_addr_type(BLE_ADDR_TYPE_RANDOM);
+                  - ble_client.connect: holman_ble
+                  - wait_until:
+                      condition:
+                        lambda: 'return id(holman_ble).connected();'
+                      timeout: 10s
+
+                  - if:
+                      condition:
+                        lambda: 'return id(holman_ble).connected();'
+                      then:
+                        - delay: 300ms  # Physical hardware padding
+
+                        - logger.log: "Dispatching authorization PING..."
+                        - ble_client.ble_write:
+                            id: holman_ble
+                            service_uuid: "a876f000-7f10-4d70-b606-7df77c3eee0c"
+                            characteristic_uuid: "0000f004-0000-1000-8000-00805f9b34fb"
+                            value: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+                        - delay: 400ms  # Physical hardware padding
+
+                        - logger.log: "Dispatching state alteration payload..."
+                        - ble_client.ble_write:
+                            id: holman_ble
+                            service_uuid: "a876f000-7f10-4d70-b606-7df77c3eee0c"
+                            characteristic_uuid: "0000f004-0000-1000-8000-00805f9b34fb"
+                            value: !lambda |-
+                              int lvl = id(job_level);
+                              if (lvl == 0) {
+                                return std::vector<uint8_t>{0x00, 0x2e, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+                              } else {
+                                uint8_t b = (uint8_t)((lvl / 100.0f) * 255.0f);
+                                return std::vector<uint8_t>{0x00, 0x2e, 0x00, 0x03, 0x7f, 0x11, 0x00, 0x14, 0x1e, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x00, b, 0x00};
+                              }
+                        - delay: 400ms  # Physical hardware padding
+
+                        - lambda: 'id(ble_success) = true;'
+                        - ble_client.disconnect: holman_ble
+                      else:
+                        - logger.log: "BLE attempt failed. Retrying..."
+                        - lambda: 'id(ble_attempt)++;'
+                        - delay: 2s
+
+            # On success: Publish confirmed state to MQTT (retained = true)
+            - if:
+                condition:
+                  lambda: 'return id(ble_success);'
+                then:
+                  - lambda: |-
+                      int lvl = id(job_level);
+                      std::string state_json;
+                      if (lvl == 0) {
+                        state_json = "{\"state\":\"OFF\"}";
+                      } else {
+                        id(last_known_brightness) = lvl;
+                        state_json = "{\"state\":\"ON\",\"brightness\":" + std::to_string(lvl) + "}";
+                      }
+                      id(mqtt_client).publish("homeassistant/light/garden_lights/state", state_json, 0, true);
+                      ESP_LOGI("worker", "Confirmed state synchronized to HAOS: %s", state_json.c_str());
+                else:
+                  - logger.log: "ERROR: Target command execution failed permanently after 3 attempts."
+
+            - delay: 1200ms  # Physical cooldown window before processing queued changes
