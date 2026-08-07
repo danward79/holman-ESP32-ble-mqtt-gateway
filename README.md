@@ -1,5 +1,9 @@
 # ESPHome Bridge for Holman Bluetooth Garden Light Controllers
 
+[![ESPHome Version](https://img.shields.io/badge/ESPHome-v2026.7%2B-blue.svg)](https://esphome.io/)
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-Compatible-41BDF5.svg)](https://www.home-assistant.io/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 An asynchronous ESPHome firmware bridge that brings **Holman Vibrance Warm White BLE Garden Light Controllers** into Home Assistant via MQTT with single-tile dashboard support, hardware confirmation, and auto-discovery.
 
 ---
