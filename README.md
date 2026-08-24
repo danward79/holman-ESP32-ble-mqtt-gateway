@@ -70,9 +70,34 @@ Once the ESP32 connects to Wi-Fi and MQTT:
 
 ## 🔬 Protocol Technical Notes
 
+* **GATT Service UUID:** `a876f000-7f10-4d70-b606-7df77c3eee0c`
 * **GATT Write Characteristic:** `0000f004-0000-1000-8000-00805f9b34fb`
 * **GATT Notify Characteristic:** `a876f003-7f10-4d70-b606-7df77c3eee0c`
-* **Authorization Sequence:** An initial 20-byte zero payload (`[0x00] * 20`) is required to authenticate the session before sending state parameters.
-* **State Payload Structure (20 Bytes):**
-  * **Manual OFF:** `00 2e ff 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00`
-  * **Manual Dim:** `00 2e 00 03 7f 11 00 14 1e 00 ff 00 00 00 00 00 64 00 [BRIGHTNESS_BYTE] 00` (where `BRIGHTNESS_BYTE` scales linearly from `0x00` to `0xFF`).
+* **Authorization Sequence:** An initial 20-byte zero payload (`[0x00] * 20`) must be written to authenticate the GATT connection before sending state alterations.
+
+#### 20-Byte Payload Map
+
+| Byte Index | Field Name | Standard Value | Description |
+| :--- | :--- | :--- | :--- |
+| **`[00 - 01]`** | **Header** | `00 2E` | Operation Command (`0x2E` = Direct Manual Override) |
+| **`[02]`** | **Scene ID** | `00` | Target scene / channel index (`0x00` = Scene 1) |
+| **`[03]`** | **Timer Control Flags** | `03` | Bitwise flags: <br> • Bit 0: Start time enable (`1`) <br> • Bit 1: Stop time enable (`1`) |
+| **`[04]`** | **Day Mask** | `7F` | `0x7F` (`01111111` binary) = Enabled for all 7 days |
+| **`[05 - 06]`** | **Start Time** | `11 00` | Timer start time (`17:00` / 5:00 PM) |
+| **`[07 - 08]`** | **Stop Time** | `14 1E` | Timer stop time (`20:30` / 8:30 PM) |
+| **`[09]`** | **Reserved** | `00` | Unknown / Padding |
+| **`[10 - 15]`** | **Padding Block** | `FF 00 00 00 00 00` | Static protocol boundary padding |
+| **`[16 - 17]`** | **Fixed Scale** | `64 00` | Scale maximum (`100` in decimal) |
+| **`[18]`** | **Brightness Value** | `00` - `FF` | Target dimming level (`0` = OFF, `255` = 100% Brightness) |
+| **`[19]`** | **Tail Byte** | `00` | End-of-frame packet delimiter |
+
+#### Command Payload Examples
+
+* **Manual OFF Command:**
+  ```text
+  00 2e ff 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  ```
+* **Manual ON (80% Brightness / Byte 18 = `0xCC`):**
+  ```text
+  00 2e 00 03 7f 11 00 14 1e 00 ff 00 00 00 00 00 64 00 cc 00
+  ```
